@@ -2,65 +2,79 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 
-function createServer() {
-	const server = new McpServer({
-		name: "Authless Calculator",
-		version: "1.0.0",
-	});
+function createServer(env: Env) {
+  const server = new McpServer({
+    name: "OpenAI Bridge",
+    version: "1.0.0",
+  });
 
-	server.registerTool(
-		"add",
-		{ inputSchema: z.object({ a: z.number(), b: z.number() }) },
-		async ({ a, b }) => ({
-			content: [{ type: "text", text: String(a + b) }],
-		}),
-	);
+  server.registerTool(
+    "ask_openai",
+    {
+      description: "Send a prompt to OpenAI and return the response",
+      inputSchema: {
+        prompt: z.string().describe("The prompt to send to OpenAI"),
+      },
+    },
+    async ({ prompt }) => {
+      try {
+        const response = await fetch("https://api.openai.com/v1/responses", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+          },
+          body: JSON.stringify({
+            model: "gpt-5.6-luna",
+            input: prompt,
+          }),
+        });
 
-	server.registerTool(
-		"calculate",
-		{
-			inputSchema: z.object({
-				operation: z.enum(["add", "subtract", "multiply", "divide"]),
-				a: z.number(),
-				b: z.number(),
-			}),
-		},
-		async ({ operation, a, b }) => {
-			let result: number;
-			switch (operation) {
-				case "add":
-					result = a + b;
-					break;
-				case "subtract":
-					result = a - b;
-					break;
-				case "multiply":
-					result = a * b;
-					break;
-				case "divide":
-					if (b === 0)
-						return {
-							content: [
-								{
-									type: "text",
-									text: "Error: Cannot divide by zero",
-								},
-							],
-						};
-					result = a / b;
-					break;
-			}
-			return { content: [{ type: "text", text: String(result) }] };
-		},
-	);
+        const data: any = await response.json();
 
-	return server;
+        if (!response.ok) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `OpenAI API error: ${data?.error?.message ?? response.status}`,
+              },
+            ],
+          };
+        }
+
+        const text = (data.output ?? [])
+          .flatMap((item: any) => item.content ?? [])
+          .filter((item: any) => item.type === "output_text")
+          .map((item: any) => item.text)
+          .join("\n");
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: text || "OpenAI returned no text.",
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error contacting OpenAI: ${String(error)}`,
+            },
+          ],
+        };
+      }
+    },
+  );
+
+  return server;
 }
 
-const handler = createMcpHandler(createServer);
-
 export default {
-	fetch(request: Request, env: Env, ctx: ExecutionContext) {
-		return handler(request, env, ctx);
-	},
+  fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    return createMcpHandler(() => createServer(env))(request, env, ctx);
+  },
 } satisfies ExportedHandler<Env>;
